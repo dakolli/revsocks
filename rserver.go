@@ -9,29 +9,179 @@ import (
 	"os"
 
 	"bufio"
-	"github.com/hashicorp/yamux"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/hashicorp/yamux"
+
 	"context"
 	"net/http"
-	"nhooyr.io/websocket"
 	"sync"
 
-	"golang.org/x/crypto/acme/autocert"
+	"nhooyr.io/websocket"
+
 	"path/filepath"
+
+	"golang.org/x/crypto/acme/autocert"
 )
 
 var proxytout = time.Millisecond * 1000 //timeout for wait magicbytes
 
+// SharedSOCKS5Manager manages a single shared SOCKS5 port for all agents
+type SharedSOCKS5Manager struct {
+	mu         sync.RWMutex
+	listener   net.Listener
+	port       int
+	address    string
+	isRunning  bool
+	sessions   []*yamux.Session
+	agentCount int
+}
+
+// Global shared SOCKS5 manager instance
+var sharedSOCKSManager *SharedSOCKS5Manager
+
+// StartSharedSOCKS5 initializes and starts the shared SOCKS5 listener if not already running
+func (s *SharedSOCKS5Manager) StartSharedSOCKS5(address string, port int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.isRunning {
+		log.Printf("[SHARED-SOCKS5] Manager already running on %s:%d", s.address, s.port)
+		return nil
+	}
+
+	s.address = address
+	s.port = port
+	fullAddress := fmt.Sprintf("%s:%d", address, port)
+
+	// Start the shared SOCKS5 listener
+	listener, err := net.Listen("tcp", fullAddress)
+	if err != nil {
+		log.Printf("[SHARED-SOCKS5] ERROR: Failed to start shared SOCKS5 listener on %s: %v", fullAddress, err)
+		return err
+	}
+
+	s.listener = listener
+	s.isRunning = true
+	s.sessions = make([]*yamux.Session, 0)
+
+	log.Printf("[SHARED-SOCKS5] ✅ Started shared SOCKS5 proxy on %s", fullAddress)
+
+	// Start accepting connections in a goroutine
+	go s.acceptConnections()
+	return nil
+}
+
+// AddSession adds a new agent session to the shared pool
+func (s *SharedSOCKS5Manager) AddSession(session *yamux.Session, agentAddr string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.sessions = append(s.sessions, session)
+	s.agentCount++
+
+	log.Printf("[SHARED-SOCKS5] 📱 Added agent session from %s (total agents: %d)", agentAddr, s.agentCount)
+}
+
+// RemoveSession removes a failed session from the shared pool
+func (s *SharedSOCKS5Manager) RemoveSession(session *yamux.Session, agentAddr string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i, sess := range s.sessions {
+		if sess == session {
+			// Remove session from slice
+			s.sessions = append(s.sessions[:i], s.sessions[i+1:]...)
+			s.agentCount--
+			log.Printf("[SHARED-SOCKS5] 🗑️  Removed failed session from %s (remaining agents: %d)", agentAddr, s.agentCount)
+			break
+		}
+	}
+}
+
+// GetActiveSession returns the best available session for load balancing
+func (s *SharedSOCKS5Manager) GetActiveSession() *yamux.Session {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Simple round-robin: return first available session
+	for _, session := range s.sessions {
+		if !session.IsClosed() {
+			return session
+		}
+	}
+
+	log.Printf("[SHARED-SOCKS5] ⚠️  No active sessions available")
+	return nil
+}
+
+// acceptConnections handles incoming SOCKS5 client connections
+func (s *SharedSOCKS5Manager) acceptConnections() {
+	for {
+		conn, err := s.listener.Accept()
+		if err != nil {
+			log.Printf("[SHARED-SOCKS5] ERROR: Failed to accept connection: %v", err)
+			return
+		}
+
+		log.Printf("[SHARED-SOCKS5] 🔌 SOCKS5 client connected from %s", conn.RemoteAddr())
+
+		// Handle each client connection in a goroutine
+		go s.handleClientConnection(conn)
+	}
+}
+
+// handleClientConnection manages individual SOCKS5 client connections
+func (s *SharedSOCKS5Manager) handleClientConnection(conn net.Conn) {
+	defer conn.Close()
+
+	// Get an active agent session
+	session := s.GetActiveSession()
+	if session == nil {
+		log.Printf("[SHARED-SOCKS5] ❌ No active agent sessions - rejecting client %s", conn.RemoteAddr())
+		return
+	}
+
+	// Open a stream to the agent
+	stream, err := session.Open()
+	if err != nil {
+		log.Printf("[SHARED-SOCKS5] ❌ Failed to open yamux stream for client %s: %v", conn.RemoteAddr(), err)
+		return
+	}
+	defer stream.Close()
+
+	log.Printf("[SHARED-SOCKS5] ✅ Established tunnel for client %s", conn.RemoteAddr())
+
+	// Bidirectional data copying
+	done := make(chan bool, 2)
+
+	// Copy client -> agent
+	go func() {
+		defer func() { done <- true }()
+		io.Copy(stream, conn)
+		log.Printf("[SHARED-SOCKS5] 📤 Client->Agent copy completed for %s", conn.RemoteAddr())
+	}()
+
+	// Copy agent -> client
+	go func() {
+		defer func() { done <- true }()
+		io.Copy(conn, stream)
+		log.Printf("[SHARED-SOCKS5] 📥 Agent->Client copy completed for %s", conn.RemoteAddr())
+	}()
+
+	// Wait for either direction to complete
+	<-done
+	log.Printf("[SHARED-SOCKS5] 🔚 Connection closed for client %s", conn.RemoteAddr())
+}
+
 type agentHandler struct {
 	mu        sync.Mutex
 	listenstr string // listen string for clients
-	portnext  int    // next port for listen
+	basePort  int    // base port for SOCKS5 (no longer incrementing)
 	timeout   time.Duration
 	sessions  []*yamux.Session // all sessions
-	// agentstr string // connecting agent combo (IP:port)
 }
 
 func (h *agentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -43,15 +193,13 @@ func (h *agentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if r.Header.Get("Upgrade") != "websocket" {
 		w.Header().Set("Location", "https://www.microsoft.com/")
-		w.WriteHeader(http.StatusFound) // Use 302 status code for redirect
-		// fmt.Fprintf(w, "OK")
+		w.WriteHeader(http.StatusFound)
 		return
 	}
 
 	if r.Header.Get("Accept-Language") != agentpassword {
 		w.Header().Set("Location", "https://www.microsoft.com/")
-		w.WriteHeader(http.StatusFound) // Use 302 status code for redirect
-		// fmt.Fprintf(w, "OK")
+		w.WriteHeader(http.StatusFound)
 		return
 	}
 
@@ -77,12 +225,27 @@ func (h *agentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Bad request - Go away!", 500)
 		return
 	}
+
 	h.sessions = append(h.sessions, session)
-	h.mu.Lock()
-	listenport := h.portnext
-	h.portnext = h.portnext + 1
-	h.mu.Unlock()
-	listenForClients(agentstr, h.listenstr, listenport, session)
+
+	// Initialize shared SOCKS5 manager if not already done
+	if sharedSOCKSManager == nil {
+		sharedSOCKSManager = &SharedSOCKS5Manager{}
+	}
+
+	// Start or reuse shared SOCKS5 listener on the base port
+	err = sharedSOCKSManager.StartSharedSOCKS5(h.listenstr, h.basePort)
+	if err != nil {
+		log.Printf("[%s] Failed to start shared SOCKS5 manager: %v", agentstr, err)
+		return
+	}
+
+	// Add this session to the shared manager
+	sharedSOCKSManager.AddSession(session, agentstr)
+
+	// Wait for session to close, then clean up
+	<-session.CloseChan()
+	sharedSOCKSManager.RemoveSession(session, agentstr)
 
 	c.Close(websocket.StatusNormalClosure, "")
 }
@@ -98,7 +261,7 @@ func listenForWebsocketAgents(tlslisten bool, address string, clients string, ce
 	}
 
 	aHandler := &agentHandler{
-		portnext:  portnum,
+		basePort:  portnum,
 		listenstr: listenstr[0],
 	}
 	server := &http.Server{
@@ -198,7 +361,19 @@ func listenForAgents(tlslisten bool, address string, clients string, certificate
 	if errc != nil {
 		log.Printf("Error converting listen str %s: %v", clients, errc)
 	}
-	portinc := 0
+
+	// Initialize shared SOCKS5 manager
+	if sharedSOCKSManager == nil {
+		sharedSOCKSManager = &SharedSOCKS5Manager{}
+	}
+
+	// Start shared SOCKS5 listener on the base port
+	err = sharedSOCKSManager.StartSharedSOCKS5(listenstr[0], portnum)
+	if err != nil {
+		log.Printf("Failed to start shared SOCKS5 manager: %v", err)
+		return err
+	}
+
 	for {
 		conn, err := ln.Accept()
 		conn.RemoteAddr()
@@ -252,62 +427,24 @@ func listenForAgents(tlslisten bool, address string, clients string, certificate
 				continue
 			}
 			sessions = append(sessions, session)
-			go listenForClients(agentstr, listenstr[0], portnum+portinc, session)
-			portinc = portinc + 1
+
+			// Add session to shared manager instead of starting individual listeners
+			sharedSOCKSManager.AddSession(session, agentstr)
+
+			// Monitor session in a goroutine and clean up when it closes
+			go func(sess *yamux.Session, addr string) {
+				<-sess.CloseChan()
+				sharedSOCKSManager.RemoveSession(sess, addr)
+				log.Printf("[%s] Session closed and removed from shared manager", addr)
+			}(session, agentstr)
 		}
 	}
 	return nil
 }
 
-// Catches local clients and connects to yamux
+// DEPRECATED: This function is no longer needed with the shared SOCKS5 manager
+// Keeping for compatibility but it should not be called in the new architecture
 func listenForClients(agentstr string, listen string, port int, session *yamux.Session) error {
-	var ln net.Listener
-	var address string
-	var err error
-	portinc := port
-	for {
-		address = fmt.Sprintf("%s:%d", listen, portinc)
-		log.Printf("[%s] Handshake recognized. Waiting for clients on %s", agentstr, address)
-		ln, err = net.Listen("tcp", address)
-		if err != nil {
-			log.Printf("[%s] Error listening on %s: %v", agentstr, address, err)
-			portinc = portinc + 1
-		} else {
-			break
-		}
-	}
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			log.Printf("[%s] Error accepting on %s: %v", agentstr, address, err)
-			return err
-		}
-		if session == nil {
-			log.Printf("[%s] Session on %s is nil", agentstr, address)
-			conn.Close()
-			continue
-		}
-		log.Printf("[%s] Got client. Opening stream for %s", agentstr, conn.RemoteAddr())
-
-		stream, err := session.Open()
-		if err != nil {
-			log.Printf("[%s] Error opening stream for %s: %v", agentstr, conn.RemoteAddr(), err)
-			return err
-		}
-
-		// connect both of conn and stream
-
-		go func() {
-			log.Printf("[%s] Starting to copy conn to stream for %s", agentstr, conn.RemoteAddr())
-			io.Copy(conn, stream)
-			conn.Close()
-			log.Printf("[%s] Done copying conn to stream for %s", agentstr, conn.RemoteAddr())
-		}()
-		go func() {
-			log.Printf("[%s] Starting to copy stream to conn for %s", agentstr, conn.RemoteAddr())
-			io.Copy(stream, conn)
-			stream.Close()
-			log.Printf("[%s] Done copying stream to conn for %s", agentstr, conn.RemoteAddr())
-		}()
-	}
+	log.Printf("[DEPRECATED] listenForClients called - this should use SharedSOCKS5Manager instead")
+	return fmt.Errorf("deprecated function - use SharedSOCKS5Manager")
 }

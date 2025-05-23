@@ -14,12 +14,13 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/base64"
-	socks5 "github.com/armon/go-socks5"
-	"github.com/hashicorp/yamux"
 	"io/ioutil"
 	"net/http"
 	"strings"
 	"time"
+
+	socks5 "github.com/armon/go-socks5"
+	"github.com/hashicorp/yamux"
 
 	ntlmssp "github.com/kost/go-ntlmssp"
 
@@ -32,7 +33,7 @@ var username string
 var domain string
 var password string
 var connectproxystring string
-var useragent string
+var useragent string = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 var proxytimeout = time.Millisecond * 1000 //timeout for proxyserver response
 
 func GetSystemProxy(method string, urlstr string) (*url.URL, error) {

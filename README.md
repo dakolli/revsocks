@@ -1,185 +1,305 @@
-[![CircleCI](https://circleci.com/gh/kost/revsocks.svg?style=svg)](https://circleci.com/gh/kost/revsocks)
-[![Codacy Badge](https://api.codacy.com/project/badge/Grade/3c687bcd445e4a828c914e4e2384196e)](https://www.codacy.com/manual/kost/revsocks?utm_source=github.com&utm_medium=referral&utm_content=kost/revsocks&utm_campaign=Badge_Grade)
+# Revsocks-Modified - Enhanced Embeddable Reverse SOCKS5 Proxy
 
-# revsocks
+[![CircleCI](https://circleci.com/gh/dakolli/revsocks-modified.svg?style=svg)](https://circleci.com/gh/dakolli/revsocks-modified)
+[![Go Report Card](https://goreportcard.com/badge/github.com/dakolli/revsocks-modified)](https://goreportcard.com/report/github.com/dakolli/revsocks-modified)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Go Version](https://img.shields.io/badge/Go-1.21+-blue.svg)](https://golang.org/dl/)
 
-Reverse socks5 tunneler with SSL/TLS and proxy support (without proxy authentication and with basic/NTLM proxy authentication)
-Based on <https://github.com/brimstone/rsocks> and <https://github.com/llkat/rsockstun>
+> 🚀 **MAJOR REFACTOR**: Version 3.0 introduces a complete architectural overhaul with modern Go practices, enhanced security, and production-ready features.
 
-# Features
+**Revsocks-Modified** is a production-ready, embeddable reverse SOCKS5 proxy with advanced tunneling capabilities. This enhanced version provides a complete refactor with modern Go architecture, making it suitable for both standalone use and embedding in larger applications.
 
--   Single executable (thanks to Go!)
--   Linux/Windows/Mac/BSD support
--   Encrypted communication with TLS
--   DNS tunneling support (SOCKS5 over DNS)
--   Support for proxies (without authentication or with basic/NTLM proxy authentication)
--   Automatic SSL/TLS certificate generation if not specified
+## 🆕 What's New in 3.0
 
-# Architecture
+### 🏗️ **Complete Architectural Refactor**
+- **Modular Package Structure**: Clean separation of concerns with dedicated packages
+- **Modern CLI with Cobra**: Intuitive command structure with shell completion
+- **Structured Logging**: Context-aware logging with multiple output formats
+- **Configuration Management**: YAML/JSON config files with validation
+- **Enhanced Security**: Production-grade TLS with modern cipher suites
 
--   server = locally listening socks server
--   client = client which connects back to server
+### ✨ **New Features**
+- **Embeddable Library**: Use revsocks as a Go library in your applications
+- **Advanced Crypto Utilities**: Secure password and key generation
+- **Comprehensive Validation**: Configuration and input validation
+- **Production Monitoring**: Structured logging with metrics support
+- **Shell Completion**: Bash, Zsh, Fish, and PowerShell support
 
-## Usage
+## 📋 Features
 
-### reverse TCP
+### 🔐 **Security & Encryption**
+- **TLS 1.2+ Encryption** with modern cipher suites
+- **Automatic Certificate Generation** with secure defaults
+- **Let's Encrypt Integration** for production deployments
+- **Cryptographically Secure** password and key generation
+- **Certificate Validation** and chain verification
 
-    Usage:
-    1) Start on VPS: revsocks -listen :8443 -socks 127.0.0.1:1080 -pass SuperSecretPassword
-    2) Start on client: revsocks -connect clientIP:8443 -pass SuperSecretPassword
-    3) Connect to 127.0.0.1:1080 on the VPS with any socks5 client.
-    4) Enjoy. :]
+### 🌐 **Transport Protocols**
+- **Raw TCP** - Direct TCP connections
+- **TLS-Encrypted TCP** - Secure encrypted tunnels
+- **WebSocket** - HTTP-compatible transport (with optional TLS)
+- **DNS Tunneling** - Covert channels through DNS queries
 
-### reverse TCP with TLS encryption
+### 🔄 **Proxy Support**
+- **Corporate Proxies** with authentication
+- **Basic Authentication** support
+- **NTLM Authentication** for Windows domains
+- **System Proxy Detection** automatic configuration
+- **Configurable Timeouts** and retry logic
 
-    Usage:
-    1) Start on VPS: revsocks -listen :8443 -socks 127.0.0.1:1080 -pass SuperSecretPassword -tls
-    2) Start on client: revsocks -connect clientIP:8443 -pass SuperSecretPassword -tls
-    3) Connect to 127.0.0.1:1080 on the VPS with any socks5 client.
-    4) Enjoy. :]
+### 🔧 **Operational Features**
+- **Automatic Reconnection** with configurable backoff
+- **Health Monitoring** and connection tracking
+- **Graceful Shutdown** with connection draining
+- **Resource Management** with proper cleanup
+- **Production Logging** with structured output
 
-### reverse websocket with TLS encryption
+## 🚀 Quick Start
 
-    Usage:
-    1) Start on VPS: `revsocks -listen :8443 -socks 127.0.0.1:1080 -pass SuperSecretPassword -tls -ws`
-    2) Start on client: `revsocks -connect https://clientIP:8443 -pass SuperSecretPassword -ws`
-    3) Connect to 127.0.0.1:1080 on the VPS with any socks5 client.
+### Installation
 
-### DNS tunnel
+```bash
+# Clone the repository
+git clone https://github.com/dakolli/revsocks-modified.git
+cd revsocks-modified
 
-```sh
-0) setup your domain records
-1) Start on the DNS server: revsocks -dns example.com -dnslisten :53 -socks 127.0.0.1:1080 -pass 52fdfc072182654f163f5f0f9a621d729566c74d10037c4d7bbb0407d1e2c64
-2) Start on the target: revsocks -dns example.com -pass 52fdfc072182654f163f5f0f9a621d729566c74d10037c4d7bbb0407d1e2c64
-3) Connect to 127.0.0.1:1080 on the DNS server with any socks5 client.
+# Build the application
+make all
+
+# Or install dependencies and build
+go mod tidy
+go build -o revsocks .
 ```
 
-## Useful parameters
+### Basic Usage
 
-    Add params:
-     -proxy 1.2.3.4:3128 - connect via proxy
-     -proxyauth Domain/username:password  - proxy creds
-     -proxytimeout 2000 - server and clients will wait for 2000 msec for proxy connections... (Sometime it should be up to 4000...)
-     -useragent "Internet Explorer 9.99" - User-Agent used in proxy connection (sometimes it is usefull)
-     -pass Password12345 - challenge password between client and server (if not match - server reply 301 redirect)
-     -recn - reconnect times number. Default is 3. If 0 - infinite reconnection
-     -rect - time delay in secs between reconnection attempts. Default is 30
+#### 1. **Server Mode** (Listen for agents)
+```bash
+# Start server listening for agents
+revsocks server --listen :8443 --socks 127.0.0.1:1080 --password mysecret --tls
 
-## Options
-
-Complete list of command line options
-
-```
-  -agent string
-    	User agent to use (default "Mozilla/5.0 (Windows NT 6.1; Trident/7.0; rv:11.0) like Gecko")
-  -cert string
-    	certificate file
-  -connect string
-    	connect address:port (or https://address:port for ws)
-  -debug
-    	display debug info
-  -dns string
-    	DNS domain to use for DNS tunneling
-  -dnsdelay string
-    	Delay/sleep time between requests (200ms by default)
-  -dnslisten string
-    	Where should DNS server listen
-  -listen string
-    	listen port for receiver address:port
-  -pass string
-    	Connect password
-  -proxy string
-    	use proxy address:port for connecting (or http://address:port for ws)
-  -proxyauth string
-    	proxy auth Domain/user:Password
-  -proxytimeout string
-    	proxy response timeout (ms)
-  -q	Be quiet
-  -recn int
-    	reconnection limit (default 3)
-  -rect int
-    	reconnection delay (default 30)
-  -socks string
-    	socks address:port (default "127.0.0.1:1080")
-  -tls
-    	use TLS for connection
-  -verify
-    	verify TLS connection
-  -version
-    	version information
-  -ws
-    	use websocket for connection
+# With automatic TLS certificate
+revsocks server --listen :8443 --socks 127.0.0.1:1080 --password mysecret \
+                 --tls --autocert-domain yourdomain.com
 ```
 
-# Requirements
+#### 2. **Client Mode** (Connect to server)
+```bash
+# Connect client to server
+revsocks client --connect server.example.com:8443 --password mysecret --tls
 
--   Go 1.4 or higher
--   Few external Go modules (yamux, go-socks5 and go-ntlmssp)
-
-# Compile and Installation
-
-Linux VPS
-
--   install Golang: apt install golang make
-
-```sh
-make
+# Connect through corporate proxy
+revsocks client --connect server.example.com:8443 --password mysecret --tls \
+                 --proxy proxy.corp.com:3128 --proxy-auth "DOMAIN/user:pass"
 ```
 
-launch:
+#### 3. **DNS Tunneling**
+```bash
+# DNS Server (listening for clients)
+revsocks dns-server --domain tunnel.example.com --listen :53 \
+                    --socks 127.0.0.1:1080 --key <64-char-hex-key>
 
-```sh
-./revsocks -listen :8443 -socks 127.0.0.1:1080 -pass Password1234
+# DNS Client (connecting through DNS)
+revsocks dns-client --domain tunnel.example.com --key <64-char-hex-key>
 ```
 
-Windows client:
+### Utility Commands
 
--   download and install golang
+```bash
+# Generate secure password
+revsocks generate-password 32
 
-```sh
-go get
-go build
+# Generate DNS encryption key
+revsocks generate-key
+
+# Show configuration
+revsocks config show
+
+# Create sample config file
+revsocks config init ~/.revsocks.yaml
 ```
 
-## Windows optional
+## 📖 Architecture Overview
 
-optional: to build as Windows GUI:
-
-```sh
-go build -ldflags -H=windowsgui
+### 🏗️ **Package Structure**
+```
+revsocks-modified/
+├── cmd/                    # Cobra CLI commands
+│   ├── root.go            # Root command and global flags
+│   ├── server.go          # Server command implementation
+│   ├── client.go          # Client command implementation
+│   └── dns.go             # DNS tunneling commands
+├── pkg/                    # Public library packages
+│   ├── config/            # Configuration management
+│   ├── crypto/            # TLS and cryptographic utilities
+│   ├── server/            # Server implementations
+│   ├── client/            # Client implementations
+│   ├── proxy/             # Proxy authentication
+│   └── dns/               # DNS tunneling
+├── internal/              # Private packages
+│   ├── logger/           # Structured logging
+│   └── utils/            # Common utilities
+├── main.go               # Application entry point
+├── go.mod                # Go module definition
+└── README.md             # Documentation
 ```
 
-You can also compress exe - just use any exe packer, ex: UPX
-
-```sh
-upx revsocks
+### 🔄 **Data Flow Diagram**
+```
+┌─────────────┐    TLS/TCP/WS    ┌─────────────┐    SOCKS5    ┌─────────────┐
+│   Client    │◄──────────────►│   Server    │◄─────────────►│ SOCKS Client│
+│  (Agent)    │     Tunnel      │ (Listener)  │  Local Conn  │   (App)     │
+└─────────────┘                 └─────────────┘              └─────────────┘
+      │                               │
+      │        Corporate Proxy        │
+      └──────────────────────────────►│
+            (Optional)                │
+                                     ┌▼─────────────┐
+                                     │ Target Server│
+                                     │  (Internet)  │
+                                     └──────────────┘
 ```
 
-## Usage examples
+## ⚙️ Configuration
 
-```sh
-revsocks -connect clientIP:8443 -pass Password1234
+### Configuration File Example
+```yaml
+# Server configuration
+server:
+  listen: ":8443"
+  socks: "127.0.0.1:1080"
+  websocket: false
+
+# Client configuration  
+client:
+  connect: "server.example.com:8443"
+  password: "your-secure-password"
+  websocket: false
+  reconnect:
+    max_attempts: 3
+    delay_seconds: 30
+
+# TLS configuration
+tls:
+  enabled: true
+  verify: true
+  autocert_domain: "yourdomain.com"
+
+# Proxy configuration
+proxy:
+  address: "proxy.corp.com:3128"
+  timeout_ms: 5000
+  auth:
+    username: "user"
+    password: "pass"
+    domain: "DOMAIN"
+
+# Logging configuration
+logging:
+  level: "info"
+  format: "text"
+  quiet: false
 ```
 
-or with proxy and user agent:
-
-```sh
-revsocks -connect clientIP:8443 -pass Password1234 -proxy proxy.domain.local:3128 -proxyauth Domain/userpame:userpass -useragent "Mozilla 5.0/IE Windows 10"
+### Environment Variables
+```bash
+# All configuration can be set via environment variables
+export REVSOCKS_SERVER_LISTEN=":8443"
+export REVSOCKS_CLIENT_PASSWORD="mysecret"
+export REVSOCKS_TLS_ENABLED="true"
+export REVSOCKS_LOGGING_LEVEL="debug"
 ```
 
-Client connects to server and send agentpassword to authorize on server. If server does not receive agentpassword or reveive wrong pass from client (for example if spider or client browser connects to server ) then it send HTTP 301 redirect code to www.microsoft.com
+## 🔧 Advanced Usage
 
-## Custom certificate
+### WebSocket Transport
+```bash
+# Server with WebSocket
+revsocks server --listen :8443 --socks 127.0.0.1:1080 --websocket --tls
 
-Generate self-signed certificate with openssl:
-
-```sh
-openssl req -new -x509 -keyout server.key -out server.crt -days 365 -nodes
+# Client connecting via WebSocket  
+revsocks client --connect https://server.example.com:8443 --websocket
 ```
 
-## Debug
+### DNS Tunneling Setup
+```bash
+# 1. Set up DNS records for your domain
+# A record: tunnel.example.com -> your-server-ip
 
-For debugging (especially DNS part):
-```sh
-go build -tags debug
+# 2. Start DNS server
+revsocks dns-server --domain tunnel.example.com --listen :53 \
+                    --socks 127.0.0.1:1080
+
+# 3. Connect DNS client
+revsocks dns-client --domain tunnel.example.com
 ```
+
+### Corporate Proxy Examples
+```bash
+# Basic authentication
+revsocks client --connect server:8443 --proxy proxy.corp.com:3128 \
+                 --proxy-auth "username:password"
+
+# NTLM authentication (Windows domain)
+revsocks client --connect server:8443 --proxy proxy.corp.com:3128 \
+                 --proxy-auth "DOMAIN/username:password"
+
+# System proxy (automatic detection)
+revsocks client --connect server:8443 --proxy "."
+```
+
+## 🛠️ Development
+
+### Building from Source
+```bash
+# Install dependencies
+make dep
+
+# Build binary
+make revsocks
+
+# Build static binary (for containers)
+make static
+
+# Cross-compile for multiple platforms
+make gox
+
+# Run tests
+make test
+
+# Run with coverage
+make test-coverage
+```
+
+### Development Tools
+```bash
+# Install development dependencies
+make dev-deps
+
+# Format code
+make fmt
+
+# Run linter
+make lint
+
+# Security scan
+make security
+```
+
+### Demo Mode
+```bash
+# Run demo to see new features
+make demo
+
+# Generate secure password
+make demo-password
+
+# Generate DNS key
+make demo-key
+```
+
+## 📞 Support
+
+- **Issues**: [GitHub Issues](https://github.com/dakolli/revsocks-modified/issues)
+- **Documentation**: [Wiki](https://github.com/dakolli/revsocks-modified/wiki)
+- **Security**: See [SECURITY.md](SECURITY.md) for reporting security issues

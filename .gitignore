@@ -22,3 +22,10 @@ _testmain.go
 *.exe
 *.test
 *.prof
+
+# Examples generated files
+examples/embedded/demo-cert.crt
+examples/embedded/demo-cert.key
+
+# Temporary files
+globals.go

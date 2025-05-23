@@ -1,0 +1,85 @@
+// Demo file showcasing the crypto utilities and embedded library features
+// This was moved from demo-main.go to avoid main function conflicts
+// Run with: go run demo-main.go.bak (rename to .go first)
+package main
+
+import (
+	"fmt"
+	"os"
+
+	"revsocks-modified/internal/logger"
+	"revsocks-modified/pkg/config"
+	"revsocks-modified/pkg/crypto"
+)
+
+func main() {
+	fmt.Println("🚀 Revsocks-Modified Crypto Utilities Demo")
+	fmt.Println("This demonstrates the embedded library functionality")
+	fmt.Println()
+
+	// Initialize structured logging
+	logConfig := logger.Config{
+		Level:     "info",
+		Format:    "text",
+		Component: "demo",
+	}
+	appLogger := logger.New(logConfig)
+	logger.SetDefault(appLogger)
+
+	// Demonstrate configuration system
+	cfg := config.NewConfig()
+	appLogger.Info("Configuration loaded", logger.Fields{
+		"server_listen": cfg.Server.Listen,
+		"server_socks":  cfg.Server.Socks,
+		"tls_enabled":   cfg.TLS.Enabled,
+		"log_level":     cfg.Logging.Level,
+	})
+
+	// Demonstrate crypto utilities
+	appLogger.Info("Demonstrating crypto utilities")
+
+	// Generate secure password
+	password, err := crypto.GenerateSecurePassword(32)
+	if err != nil {
+		appLogger.Error("Failed to generate password", logger.Fields{
+			"error": err.Error(),
+		})
+		os.Exit(1)
+	}
+
+	fmt.Printf("🔑 Generated secure password: %s\n", password)
+
+	// Generate DNS encryption key
+	keyBytes, err := crypto.GenerateSecureRandomBytes(32)
+	if err != nil {
+		appLogger.Error("Failed to generate encryption key", logger.Fields{
+			"error": err.Error(),
+		})
+		os.Exit(1)
+	}
+
+	fmt.Printf("🔐 Generated DNS encryption key: %x\n", keyBytes)
+
+	// Generate TLS certificate
+	appLogger.Info("Generating self-signed TLS certificate")
+
+	generator := crypto.NewCertificateGenerator()
+	cert, err := generator.GenerateSelfSignedCertificate(crypto.CertificateOptions{
+		Subject: crypto.DefaultServerSubject(),
+		Hosts:   []string{"localhost", "127.0.0.1", "example.com"},
+		KeySize: 2048, // Smaller key for demo speed
+	})
+	if err != nil {
+		appLogger.Error("Failed to generate certificate", logger.Fields{
+			"error": err.Error(),
+		})
+		os.Exit(1)
+	}
+
+	fmt.Printf("📜 Generated TLS certificate (%d bytes)\n", len(cert.Certificate[0]))
+
+	fmt.Println()
+	fmt.Println("✅ All crypto utilities working!")
+	fmt.Println("📖 See examples/embedded/main.go for full embedding examples")
+	fmt.Println("🔧 Use 'go build . && ./revsocks --help' for CLI usage")
+} 
