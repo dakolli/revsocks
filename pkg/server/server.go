@@ -22,20 +22,33 @@ import (
 	"revsocks-modified/pkg/crypto"
 )
 
+// SharedSOCKS5Manager manages a single shared SOCKS5 port for all agents in the new server
+type SharedSOCKS5Manager struct {
+	mu         sync.RWMutex
+	listener   net.Listener
+	port       int
+	address    string
+	isRunning  bool
+	sessions   []*yamux.Session
+	agentCount int
+	logger     *logger.Logger
+	ctx        context.Context
+}
+
 // Server represents a reverse SOCKS5 proxy server instance
 // It manages agent connections and forwards SOCKS5 traffic through established tunnels.
 type Server struct {
-	config   *config.Config
-	logger   *logger.Logger
-	listener net.Listener
-	server   *http.Server // for WebSocket mode
-	sessions []*yamux.Session
-	mu       sync.RWMutex
-	ctx      context.Context
-	cancel   context.CancelFunc
+	config       *config.Config
+	logger       *logger.Logger
+	listener     net.Listener
+	server       *http.Server // for WebSocket mode
+	sessions     []*yamux.Session
+	mu           sync.RWMutex
+	ctx          context.Context
+	cancel       context.CancelFunc
+	socksManager *SharedSOCKS5Manager
 
 	// Connection tracking
-	nextPort    int
 	activeConns sync.Map // map[string]*Connection for tracking active connections
 }
 
@@ -50,6 +63,179 @@ type Connection struct {
 	BytesOut    int64
 }
 
+// StartSharedSOCKS5 initializes and starts the shared SOCKS5 listener if not already running
+func (s *SharedSOCKS5Manager) StartSharedSOCKS5(address string, port int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.isRunning {
+		s.logger.Info("SharedSOCKS5 manager already running", logger.Fields{
+			"address": s.address,
+			"port":    s.port,
+		})
+		return nil
+	}
+
+	s.address = address
+	s.port = port
+	fullAddress := fmt.Sprintf("%s:%d", address, port)
+
+	// Start the shared SOCKS5 listener
+	listener, err := net.Listen("tcp", fullAddress)
+	if err != nil {
+		s.logger.Error("Failed to start shared SOCKS5 listener", logger.Fields{
+			"error":   err.Error(),
+			"address": fullAddress,
+		})
+		return err
+	}
+
+	s.listener = listener
+	s.isRunning = true
+	s.sessions = make([]*yamux.Session, 0)
+
+	s.logger.Info("✅ Started shared SOCKS5 proxy", logger.Fields{
+		"address": fullAddress,
+	})
+
+	// Start accepting connections in a goroutine
+	go s.acceptConnections()
+	return nil
+}
+
+// AddSession adds a new agent session to the shared pool
+func (s *SharedSOCKS5Manager) AddSession(session *yamux.Session, agentAddr string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.sessions = append(s.sessions, session)
+	s.agentCount++
+
+	s.logger.Info("📱 Added agent session to shared pool", logger.Fields{
+		"agent_addr":   agentAddr,
+		"total_agents": s.agentCount,
+	})
+}
+
+// RemoveSession removes a failed session from the shared pool
+func (s *SharedSOCKS5Manager) RemoveSession(session *yamux.Session, agentAddr string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i, sess := range s.sessions {
+		if sess == session {
+			// Remove session from slice
+			s.sessions = append(s.sessions[:i], s.sessions[i+1:]...)
+			s.agentCount--
+			s.logger.Info("🗑️ Removed failed session from shared pool", logger.Fields{
+				"agent_addr":       agentAddr,
+				"remaining_agents": s.agentCount,
+			})
+			break
+		}
+	}
+}
+
+// GetActiveSession returns the best available session for load balancing
+func (s *SharedSOCKS5Manager) GetActiveSession() *yamux.Session {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Simple round-robin: return first available session
+	for _, session := range s.sessions {
+		if !session.IsClosed() {
+			return session
+		}
+	}
+
+	s.logger.Warn("⚠️ No active sessions available")
+	return nil
+}
+
+// acceptConnections handles incoming SOCKS5 client connections
+func (s *SharedSOCKS5Manager) acceptConnections() {
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		default:
+			conn, err := s.listener.Accept()
+			if err != nil {
+				if s.ctx.Err() != nil {
+					return
+				}
+				s.logger.Error("Failed to accept SOCKS5 connection", logger.Fields{"error": err.Error()})
+				continue
+			}
+
+			s.logger.Info("🔌 SOCKS5 client connected", logger.Fields{
+				"client_addr": conn.RemoteAddr().String(),
+			})
+
+			// Handle each client connection in a goroutine
+			go s.handleClientConnection(conn)
+		}
+	}
+}
+
+// handleClientConnection manages individual SOCKS5 client connections
+func (s *SharedSOCKS5Manager) handleClientConnection(conn net.Conn) {
+	defer conn.Close()
+
+	clientAddr := conn.RemoteAddr().String()
+
+	// Get an active agent session
+	session := s.GetActiveSession()
+	if session == nil {
+		s.logger.Error("❌ No active agent sessions - rejecting client", logger.Fields{
+			"client_addr": clientAddr,
+		})
+		return
+	}
+
+	// Open a stream to the agent
+	stream, err := session.Open()
+	if err != nil {
+		s.logger.Error("❌ Failed to open yamux stream for client", logger.Fields{
+			"client_addr": clientAddr,
+			"error":       err.Error(),
+		})
+		return
+	}
+	defer stream.Close()
+
+	s.logger.Info("✅ Established tunnel for client", logger.Fields{
+		"client_addr": clientAddr,
+	})
+
+	// Bidirectional data copying
+	done := make(chan bool, 2)
+
+	// Copy client -> agent
+	go func() {
+		defer func() { done <- true }()
+		io.Copy(stream, conn)
+		s.logger.Debug("📤 Client->Agent copy completed", logger.Fields{
+			"client_addr": clientAddr,
+		})
+	}()
+
+	// Copy agent -> client
+	go func() {
+		defer func() { done <- true }()
+		io.Copy(conn, stream)
+		s.logger.Debug("📥 Agent->Client copy completed", logger.Fields{
+			"client_addr": clientAddr,
+		})
+	}()
+
+	// Wait for either direction to complete
+	<-done
+	s.logger.Debug("🔚 Connection closed for client", logger.Fields{
+		"client_addr": clientAddr,
+	})
+}
+
 // New creates a new Server instance with the provided configuration
 // The server can be started in TCP or WebSocket mode based on configuration.
 func New(cfg *config.Config) (*Server, error) {
@@ -60,23 +246,17 @@ func New(cfg *config.Config) (*Server, error) {
 	// Create context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Parse listen port for client connections
-	listenParts := strings.Split(cfg.Server.Socks, ":")
-	if len(listenParts) != 2 {
-		return nil, fmt.Errorf("invalid SOCKS listen address format: %s", cfg.Server.Socks)
-	}
-
-	basePort, err := strconv.Atoi(listenParts[1])
-	if err != nil {
-		return nil, fmt.Errorf("invalid SOCKS listen port: %w", err)
-	}
-
 	server := &Server{
-		config:   cfg,
-		logger:   logger.GetDefault().WithComponent("server"),
-		ctx:      ctx,
-		cancel:   cancel,
-		nextPort: basePort,
+		config: cfg,
+		logger: logger.GetDefault().WithComponent("server"),
+		ctx:    ctx,
+		cancel: cancel,
+	}
+
+	// Initialize shared SOCKS5 manager
+	server.socksManager = &SharedSOCKS5Manager{
+		logger: server.logger.WithComponent("shared-socks5"),
+		ctx:    ctx,
 	}
 
 	return server, nil
@@ -251,6 +431,23 @@ func (s *Server) handleTCPConnection(conn net.Conn) {
 
 	// Start SOCKS5 forwarding
 	s.startSOCKSForwarding(connection, connLogger)
+
+	// 🚀 CRITICAL FIX: Wait for session to close instead of exiting immediately
+	connLogger.Info("Agent session established, waiting for closure", logger.Fields{
+		"connection_id": connection.ID,
+	})
+
+	// Block until session closes - this prevents immediate cleanup and disconnection
+	select {
+	case <-session.CloseChan():
+		connLogger.Info("Agent session closed naturally", logger.Fields{
+			"connection_id": connection.ID,
+		})
+	case <-s.ctx.Done():
+		connLogger.Info("Server shutdown requested, closing session", logger.Fields{
+			"connection_id": connection.ID,
+		})
+	}
 }
 
 // handleWebSocket processes WebSocket connections from agents
@@ -311,6 +508,23 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Start SOCKS5 forwarding
 	s.startSOCKSForwarding(connection, connLogger)
 
+	// 🚀 CRITICAL FIX: Wait for session to close instead of exiting immediately
+	connLogger.Info("WebSocket agent session established, waiting for closure", logger.Fields{
+		"connection_id": connection.ID,
+	})
+
+	// Block until session closes - this prevents immediate cleanup and disconnection
+	select {
+	case <-session.CloseChan():
+		connLogger.Info("WebSocket agent session closed naturally", logger.Fields{
+			"connection_id": connection.ID,
+		})
+	case <-s.ctx.Done():
+		connLogger.Info("Server shutdown requested, closing WebSocket session", logger.Fields{
+			"connection_id": connection.ID,
+		})
+	}
+
 	// Close WebSocket gracefully
 	conn.Close(websocket.StatusNormalClosure, "Connection closed")
 }
@@ -343,95 +557,49 @@ func (s *Server) sendHTTPRedirect(w interface{}) {
 	}
 }
 
-// startSOCKSForwarding starts forwarding SOCKS5 traffic for a connection
+// startSOCKSForwarding starts forwarding SOCKS5 traffic for a connection using shared manager
 func (s *Server) startSOCKSForwarding(conn *Connection, connLogger *logger.ConnectionLogger) {
-	// Get next available port
-	s.mu.Lock()
-	port := s.nextPort
-	s.nextPort++
-	s.mu.Unlock()
-
-	// Parse SOCKS listen address
+	// Parse SOCKS listen address to get the base port and interface
 	listenParts := strings.Split(s.config.Server.Socks, ":")
-	listenAddr := fmt.Sprintf("%s:%d", listenParts[0], port)
-
-	conn.ListenPort = port
-
-	connLogger.Info("Starting SOCKS5 listener", logger.Fields{
-		"socks_address": listenAddr,
-	})
-
-	// Start listening for SOCKS5 clients
-	listener, err := net.Listen("tcp", listenAddr)
-	if err != nil {
-		connLogger.Error("Failed to start SOCKS5 listener", logger.Fields{
-			"error":   err.Error(),
-			"address": listenAddr,
+	if len(listenParts) != 2 {
+		connLogger.Error("Invalid SOCKS listen address format", logger.Fields{
+			"socks_address": s.config.Server.Socks,
 		})
 		return
 	}
-	defer listener.Close()
 
-	// Accept SOCKS5 clients
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		default:
-			client, err := listener.Accept()
-			if err != nil {
-				if s.ctx.Err() != nil {
-					return
-				}
-				connLogger.Error("Failed to accept SOCKS5 client", logger.Fields{"error": err.Error()})
-				continue
-			}
-
-			// Handle client in background
-			go s.handleSOCKSClient(conn, client, connLogger)
-		}
-	}
-}
-
-// handleSOCKSClient forwards a SOCKS5 client through the agent tunnel
-func (s *Server) handleSOCKSClient(conn *Connection, client net.Conn, connLogger *logger.ConnectionLogger) {
-	defer client.Close()
-
-	clientAddr := client.RemoteAddr().String()
-	connLogger.Info("SOCKS5 client connected", logger.Fields{
-		"client_address": clientAddr,
-	})
-
-	// Open stream through yamux
-	stream, err := conn.Session.Open()
+	basePort, err := strconv.Atoi(listenParts[1])
 	if err != nil {
-		connLogger.Error("Failed to open yamux stream", logger.Fields{
-			"error":          err.Error(),
-			"client_address": clientAddr,
+		connLogger.Error("Invalid SOCKS listen port", logger.Fields{
+			"error": err.Error(),
+			"port":  listenParts[1],
 		})
 		return
 	}
-	defer stream.Close()
 
-	// Copy data bidirectionally
-	errChan := make(chan error, 2)
+	// Set ListenPort to base port (always consistent)
+	conn.ListenPort = basePort
 
+	// Start shared SOCKS5 manager if not already running
+	err = s.socksManager.StartSharedSOCKS5(listenParts[0], basePort)
+	if err != nil {
+		connLogger.Error("Failed to start shared SOCKS5 manager", logger.Fields{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	// Add this session to the shared manager
+	s.socksManager.AddSession(conn.Session, conn.RemoteAddr)
+
+	// Monitor session health and clean up when it closes
 	go func() {
-		_, err := io.Copy(client, stream)
-		errChan <- err
+		<-conn.Session.CloseChan()
+		s.socksManager.RemoveSession(conn.Session, conn.RemoteAddr)
+		connLogger.Info("Session closed and removed from shared SOCKS5 manager", logger.Fields{
+			"connection_id": conn.ID,
+		})
 	}()
-
-	go func() {
-		_, err := io.Copy(stream, client)
-		errChan <- err
-	}()
-
-	// Wait for first error (connection closed)
-	<-errChan
-
-	connLogger.Debug("SOCKS5 client disconnected", logger.Fields{
-		"client_address": clientAddr,
-	})
 }
 
 // createTLSConfig creates a TLS configuration for the server

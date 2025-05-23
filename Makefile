@@ -154,3 +154,38 @@ demo: revsocks demo-password demo-key
 	@echo "  ✓ Configuration management with validation"
 	@echo "  ✓ Production-ready error handling"
 
+# Build the application with production optimizations and security flags
+build: clean
+	@echo "🔨 Building revsocks with shared SOCKS5 architecture..."
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
+		-ldflags "-s -w -X main.version=$(shell git describe --tags --always --dirty) -X main.commit=$(shell git rev-parse --short HEAD) -X main.buildTime=$(shell date -u '+%Y-%m-%d_%H:%M:%S')" \
+		-trimpath \
+		-o revsocks \
+		.
+	@echo "✅ Build complete: ./revsocks"
+
+# Quick development build
+revsocks: 
+	@echo "🔨 Quick build..."
+	go build -o revsocks .
+	@echo "✅ Development build complete"
+
+# Clean build artifacts
+clean:
+	@rm -f revsocks
+	@echo "🧹 Cleaned build artifacts"
+
+# Security-focused build for production deployment  
+secure-build: clean
+	@echo "🔒 Building with security optimizations..."
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
+		-ldflags "-s -w -buildid= -X main.version=$(shell git describe --tags --always --dirty)" \
+		-trimpath \
+		-tags netgo \
+		-installsuffix netgo \
+		-o revsocks \
+		.
+	@echo "🛡️ Secure build complete"
+
+.PHONY: build revsocks clean secure-build
+
